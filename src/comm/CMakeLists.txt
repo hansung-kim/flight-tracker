@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(comm CXX)
+project(comm C)
 
 set(OBJ_NAME lge-${PROJECT_NAME}-static)
 
@@ -14,5 +14,3 @@ target_link_libraries(${OBJ_NAME}
     PUBLIC
         pthread
 )
-
-target_compile_options(${OBJ_NAME} PRIVATE -D_XOPEN_SOURCE=600 -std=c++17)

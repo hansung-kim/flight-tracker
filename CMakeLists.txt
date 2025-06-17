@@ -8,8 +8,8 @@ set(CMAKE_VERBOSE_MAKEFILE on)
 
 add_subdirectory(src/ADS-B)
 add_subdirectory(src/SDR)
-# add_subdirectory(src/comm)
-# add_subdirectory(src/system)
+add_subdirectory(src/comm)
+add_subdirectory(src/system)
 
 add_executable(${PROJECT_NAME} ${CMAKE_CURRENT_SOURCE_DIR}/src/FlightTrackerMain.cpp)
 
