@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/src/ADS-B/include",
+                "${workspaceFolder}/src/SDR/include",
+                "${workspaceFolder}/src/comm/include",
+                "${workspaceFolder}/src/system/include"
+            ],
+            "defines": ["DLT_LIB_USE_FIFO_IPC", "__aarch64__"],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}
