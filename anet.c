@@ -45,6 +45,10 @@
 
 #include "anet.h"
 
+#define ANET_OK 0
+#define ANET_ERR -1
+#define ANET_ERR_LEN 256
+
 static void anetSetError(char *err, const char *fmt, ...)
 {
     va_list ap;
