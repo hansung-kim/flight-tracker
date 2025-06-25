@@ -43,6 +43,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <stdbool.h>
 #include "rtl-sdr.h"
 
 #include "Common.h"
@@ -62,6 +63,9 @@ int fixTwoBitsErrors(unsigned char *msg, int bits);
 int modesMessageLenByType(int type);
 void sigWinchCallback();
 int getTermRows();
+
+bool g_reader_thread_active = false;
+pthread_mutex_t g_thread_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ============================= Utility functions ========================== */
 
@@ -319,6 +323,30 @@ void *readerThreadEntryPoint(void *arg) {
         readDataFromFile();
     }
     return NULL;
+}
+
+void RestartReaderThread() {
+    pthread_mutex_lock(&g_thread_lock);
+
+    if (!g_reader_thread_active) {
+        printf("[Recovery] Restarting RTL-SDR reader thread...\n");
+
+        modesInitRTLSDR();
+
+        if (pthread_create(&Modes.reader_thread, NULL, readerThreadEntryPoint, NULL) == 0) {
+            g_reader_thread_active = true;
+        } else {
+            printf("[Recovery] Failed to create reader thread.\n");
+        }
+    }
+
+    pthread_mutex_unlock(&g_thread_lock);
+}
+
+void NotifyReaderExit() {
+    pthread_mutex_lock(&g_thread_lock);
+    g_reader_thread_active = false;
+    pthread_mutex_unlock(&g_thread_lock);
 }
 
 /* ============================== Debugging ================================= */
@@ -1795,13 +1823,12 @@ void modesInitNet(void) {
  * second. */
 void modesAcceptClients(void) {
     int fd, port;
-    char ip[50];
     unsigned int j;
     struct client *c;
 
     for (j = 0; j < MODES_NET_SERVICES_NUM; j++) {
         fd = anetTcpAccept(Modes.aneterr, *modesNetServices[j].socket,
-                           &Modes.client_ip, &port);
+                           Modes.client_ip, &port);
         if (fd == -1) {
             if (Modes.debug & MODES_DEBUG_NET && errno != EAGAIN)
                 printf("Accept %d: %s\n", *modesNetServices[j].socket,

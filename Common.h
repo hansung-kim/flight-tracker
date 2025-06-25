@@ -207,7 +207,8 @@ struct modesMessage {
 extern "C" {
 #endif
 
-void modesInitRTLSDR(void);
+void RestartReaderThread(void);
+void NotifyReaderExit();
 
 #ifdef __cplusplus
 }

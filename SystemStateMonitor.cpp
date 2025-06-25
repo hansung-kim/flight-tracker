@@ -16,8 +16,6 @@
 #include <chrono>
 #include <mutex>
 
-extern Modes_t Modes;
-
 class SystemStateMonitor {
 public:
     SystemStateMonitor(Modes_t *modes);
@@ -36,8 +34,9 @@ private:
     bool mIsRunning;
     int mUdpSockFd;
     uint16_t mClientPort;
+    sockaddr_in mClientAddr;
     bool InitUdp();
-    bool SendHeartbeat();
+    void SendHeartbeat();
 
     bool IsRtlSdrConnected(const char* device_name = nullptr);
     libusb_context* mUsbContext;
@@ -74,29 +73,51 @@ bool SystemStateMonitor::InitUdp() {
         return true;
     }
 
+    if(strlen(mModes->client_ip) <= 0) {
+        std::cerr << "client IP address was not updated" << mClientIp << std::endl;
+        return false;
+    }
+
+    mClientIp = mModes->client_ip;
+    mClientPort = 55555;
+
+    memset(&mClientAddr, 0, sizeof(mClientAddr));
+    mClientAddr.sin_family = AF_INET;
+    mClientAddr.sin_port = htons(mClientPort);
+    if (inet_pton(AF_INET, mClientIp.c_str(), &mClientAddr.sin_addr) <= 0) {
+        std::cerr << "Invalid client IP address: " << mClientIp << std::endl;
+        return false;
+    }
+
     mUdpSockFd = socket(AF_INET, SOCK_DGRAM, 0);
     if (mUdpSockFd < 0) {
         std::cerr << "Failed to create UDP socket" << std::endl;
         return false;
     }
 
-    if(strlen(Modes.client_ip) > 0) {
-        mClientIp = Modes.client_ip;
-    } else {
-        return false;
-    }
-
-    mClientPort = 55555;
-
     return true;
 }
 
-bool SystemStateMonitor::SendHeartbeat() {
+void SystemStateMonitor::SendHeartbeat() {
     if (!InitUdp()) {
-        return false;
+        std::cerr << "Failed to initialize UDP socket for heartbeat" << std::endl;
+        return;
     }
 
-    return true;
+    if (mUdpSockFd < 0) {
+        std::cerr << "UDP socket is not initialized" << std::endl;
+        return;
+    }
+
+    std::string heartbeatMessage = "Heartbeat from RTL-SDR Monitor";
+    ssize_t sentBytes = sendto(mUdpSockFd, heartbeatMessage.c_str(), heartbeatMessage.size(), 0,
+                               reinterpret_cast<struct sockaddr*>(&mClientAddr), sizeof(mClientAddr));
+    if (sentBytes < 0) {
+        std::cerr << "Failed to send heartbeat message: " << strerror(errno) << std::endl;
+    } else {
+        std::cout << "Heartbeat sent successfully" << std::endl;
+    }
+
 }
 
 void SystemStateMonitor::StopMonitoring() {
@@ -183,29 +204,25 @@ void SystemStateMonitor::MonitorLoop() {
         if (isConnected && !wasConnected) {
             std::cout << "[Monitor] RTL-SDR reconnected. Reinitializing..." << std::endl;
 
-            if (Modes.dev != nullptr) {
-                rtlsdr_close(Modes.dev);
-                Modes.dev = nullptr;
+            if (mModes->dev) {
+                rtlsdr_cancel_async(mModes->dev);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                rtlsdr_close(mModes->dev);
+                mModes->dev = nullptr;
             }
 
-            int dev_count = rtlsdr_get_device_count();
-            if (dev_count <= Modes.dev_index) {
-                std::cerr << "[Monitor] No RTLSDR device detected.\n";
-                return;
-            }
-
-            if (rtlsdr_open(&Modes.dev, Modes.dev_index) == 0) {
-                //modesInitRTLSDR();
-            } else {
-                std::cerr << "[Monitor] Failed to reopen RTL-SDR device." << std::endl;
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            RestartReaderThread();
 
             wasConnected = true;
         } else if (!isConnected && wasConnected) {
             std::cout << "[Monitor] RTL-SDR disconnected." << std::endl;
+            NotifyReaderExit();
             wasConnected = false;
         }
 
+        SendHeartbeat();
+    
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
