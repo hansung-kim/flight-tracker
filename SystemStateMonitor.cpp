@@ -15,12 +15,18 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <sstream>
+#include <fstream>
+#include <curl/curl.h>
 
 typedef struct {
-    uint8_t sdr_connected; // 0 or 1
-    uint8_t wifi_enabled;  // 0 or 1
-    uint8_t reserved[62];  // Padding to make the size 20 bytes
+    uint8_t sdrConnected; // 0 or 1
+    uint8_t wifiEnabled;  // 0 or 1
+    uint8_t reserved[62];  // Padding to make the size 64 bytes
 } HeartbeatMsg_t;
+
+const char* my_ckey = "J1y+RwJnL_ZM1nKZ!w1YVWx%DzlqPPPL~g83DKb(3l~E%>J}26gG=jCyT8fP-Pz4a!OD)ZBK)q|]Hp$?MD}O--L6A%k:7)b]].a#%3bP#>B9Go";
+const char* reconnect_cmd = "nc -w 60 localhost 30002 | nc -w 60 data.adsbhub.org 5001";
 
 class SystemStateMonitor {
 public:
@@ -32,14 +38,19 @@ public:
 
 private:
     void MonitorLoop();
+    void NetMonitorLoop();
+    void MaintainADSBHubConnection(const std::string& ckey, const std::string& reconnectCmd);
     
     bool mIsSDRConnected;
     bool mIsWiFiEnabled;
     
     Modes_t *mModes;
 
+    HeartbeatMsg_t mHeartbeatMsg;
+
     std::string mClientIp;
     std::thread mMonitorThread;
+    std::thread mNetMonitorThread;
     bool mIsRunning;
     int mUdpSockFd;
     uint16_t mClientPort;
@@ -65,6 +76,11 @@ SystemStateMonitor::SystemStateMonitor(Modes_t *modes) {
         std::cerr << "Failed to initialize libusb" << std::endl;
         mUsbContext = nullptr;
     }
+
+    memset(&mHeartbeatMsg, 0, sizeof(mHeartbeatMsg));
+
+    mIsSDRConnected = false;
+    mIsWiFiEnabled = false;
 }
 
 SystemStateMonitor::~SystemStateMonitor() {
@@ -76,6 +92,7 @@ void SystemStateMonitor::StartMonitoring() {
     if (!mIsRunning) {
         mIsRunning = true;
         mMonitorThread = std::thread(&SystemStateMonitor::MonitorLoop, this);
+        mNetMonitorThread =  std::thread(&SystemStateMonitor::NetMonitorLoop, this);
     }
 }
 
@@ -123,17 +140,15 @@ void SystemStateMonitor::SendHeartbeat() {
         return;
     }
 
-    uint8_t heartbeatMessage[20];
-    memset(heartbeatMessage, 0x11, sizeof(heartbeatMessage));
-
-    heartbeatMessage[0] = static_cast<uint8_t>(mIsSDRConnected ? 1 : 0);
-    heartbeatMessage[1] = static_cast<uint8_t>(mIsWiFiEnabled ? 1 : 0);
-
+    mHeartbeatMsg.sdrConnected = static_cast<uint8_t>(mIsSDRConnected ? 1 : 0);
+    mHeartbeatMsg.wifiEnabled = static_cast<uint8_t>(mIsWiFiEnabled ? 1 : 0);
+              
     std::cout << "Sending heartbeat to " << mClientIp << ":" << mClientPort
-              << " [SDR=" << (int)heartbeatMessage[0]
-              << ", WiFi=" << (int)heartbeatMessage[1] << "]" << std::endl;
+            << " [SDR :" << static_cast<int>(mHeartbeatMsg.sdrConnected)
+            << ", WiFi : " << static_cast<int>(mHeartbeatMsg.wifiEnabled)
+            << "]" << std::endl;
 
-    ssize_t sentBytes = sendto(mUdpSockFd, heartbeatMessage, 20, 0,
+    ssize_t sentBytes = sendto(mUdpSockFd, &mHeartbeatMsg, sizeof(mHeartbeatMsg), 0,
                                reinterpret_cast<struct sockaddr*>(&mClientAddr), sizeof(mClientAddr));
     if (sentBytes < 0) {
         std::cerr << "Failed to send heartbeat message: " << strerror(errno) << std::endl;
@@ -210,6 +225,127 @@ bool SystemStateMonitor::IsRtlSdrConnected(const char* device_name) {
     return connected;
 }
 
+bool isWiFiConnected() {
+    std::string result;
+    char buffer[128] = {0};
+
+    FILE* fp = popen("iwgetid -r", "r");
+    if (!fp) return false;
+
+    if (fgets(buffer, sizeof(buffer), fp)) {
+        result = buffer;
+        result.erase(result.find_last_not_of("\n\r") + 1);
+    }
+
+    pclose(fp);
+
+    return !result.empty();
+}
+
+void SystemStateMonitor::MaintainADSBHubConnection(const std::string& ckey, const std::string& reconnectCmd) {
+    static std::string myip4 = "0.0.0.0";
+    static std::string myip6 = "";
+    static int cmin = 0;
+
+    bool connected = false;
+    FILE* pipe = popen("netstat -an | grep ':5001'", "r");
+    if (pipe) {
+        char buffer[512];
+        while (fgets(buffer, sizeof(buffer), pipe)) {
+            if (strstr(buffer, "ESTABLISHED")) {
+                connected = true;
+                break;
+            }
+        }
+        pclose(pipe);
+    }
+
+    if (!connected) {
+        std::cout << "[ADSBHub] Not connected. Reconnecting..." << std::endl;
+        std::string fullCmd = "(" + reconnectCmd + ") &";
+        system(fullCmd.c_str());
+    } else {
+        std::cout << "[ADSBHub] Connected." << std::endl;
+    }
+
+    if (!ckey.empty()) {
+        cmin--;
+        if (cmin <= 0) {
+            cmin = 5;
+
+            auto getPublicIP = [](const std::string& url) -> std::string {
+                std::string result;
+                FILE* fp = popen(("curl -s " + url).c_str(), "r");
+                if (fp) {
+                    char line[128];
+                    if (fgets(line, sizeof(line), fp)) {
+                        result = line;
+                        result.erase(result.find_last_not_of("\n\r") + 1); // trim
+                    }
+                    pclose(fp);
+                }
+                return result;
+            };
+
+            std::string ip4 = getPublicIP("https://ip4.adsbhub.org/getmyip.php");
+            std::string ip6 = getPublicIP("https://ip6.adsbhub.org/getmyip.php");
+
+            if (ip4 != myip4 || ip6 != myip6) {
+                CURL* curl = curl_easy_init();
+                if (curl) {
+                    std::ostringstream url;
+                    url << "https://www.adsbhub.org/updateip.php?sessid=" << ckey
+                        << "&myip=" << ip4 << "&myip6=" << ip6;
+
+                    curl_easy_setopt(curl, CURLOPT_URL, url.str().c_str());
+                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+                    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+                    CURLcode res = curl_easy_perform(curl);
+                    if (res == CURLE_OK) {
+                        std::cout << "[ADSBHub] IP updated: " << ip4 << " / " << ip6 << std::endl;
+                        myip4 = ip4;
+                        myip6 = ip6;
+                    } else {
+                        std::cerr << "[ADSBHub] IP update failed: "
+                                  << curl_easy_strerror(res) << std::endl;
+                    }
+                    curl_easy_cleanup(curl);
+                }
+            }
+        }
+    }
+}
+
+void SystemStateMonitor::NetMonitorLoop() {
+    bool wasConnected = false;
+    mIsWiFiEnabled = false;
+
+    while (1) {
+        bool nowConnected = isWiFiConnected();
+
+        if (nowConnected && !wasConnected) {
+            std::cout << "[ADSBHub] Wi-Fi is connected (first or reconnected)." << std::endl;
+            mIsWiFiEnabled = true;
+            MaintainADSBHubConnection(my_ckey, reconnect_cmd);
+        }
+
+        if (nowConnected) {
+            std::cout << "[ADSBHub] Wi-Fi is connected." << std::endl;
+            mIsWiFiEnabled = true;
+        } else {
+            std::cout << "[ADSBHub] Wi-Fi NOT connected." << std::endl;
+            mIsWiFiEnabled = false;
+        }
+
+        wasConnected = nowConnected;
+
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+
+    //return NULL;
+}
+
 void SystemStateMonitor::MonitorLoop() {
     bool wasConnected = true;
 
@@ -250,7 +386,7 @@ void SystemStateMonitor::MonitorLoop() {
 
         SendHeartbeat();
     
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     
 }
