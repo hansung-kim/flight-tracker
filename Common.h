@@ -89,6 +89,7 @@ struct aircraft {
 /* Program global state. */
 typedef struct {
     /* Internal state */
+    pthread_t adsb_thread;
     pthread_t reader_thread;
     pthread_mutex_t data_mutex;     /* Mutex to synchronize buffer access. */
     pthread_cond_t data_cond;       /* Conditional variable associated. */

@@ -16,6 +16,12 @@
 #include <chrono>
 #include <mutex>
 
+typedef struct {
+    uint8_t sdr_connected; // 0 or 1
+    uint8_t wifi_enabled;  // 0 or 1
+    uint8_t reserved[62];  // Padding to make the size 20 bytes
+} HeartbeatMsg_t;
+
 class SystemStateMonitor {
 public:
     SystemStateMonitor(Modes_t *modes);
@@ -26,10 +32,13 @@ public:
 
 private:
     void MonitorLoop();
-
+    
+    bool mIsSDRConnected;
+    bool mIsWiFiEnabled;
+    
     Modes_t *mModes;
-    std::string mClientIp;
 
+    std::string mClientIp;
     std::thread mMonitorThread;
     bool mIsRunning;
     int mUdpSockFd;
@@ -49,6 +58,8 @@ SystemStateMonitor::SystemStateMonitor(Modes_t *modes) {
     mIsRunning = false;
     mUsbContext = nullptr;
     mLastStatus = false;
+
+    mUdpSockFd = -1;
 
     if (libusb_init(&mUsbContext) != 0) {
         std::cerr << "Failed to initialize libusb" << std::endl;
@@ -75,10 +86,13 @@ bool SystemStateMonitor::InitUdp() {
 
     if(strlen(mModes->client_ip) <= 0) {
         std::cerr << "client IP address was not updated" << mClientIp << std::endl;
-        return false;
+        mClientIp.clear();
+        mClientIp.append("192.168.137.1");
+    } else {
+        mClientIp.clear();
+        mClientIp.append(mModes->client_ip);
     }
-
-    mClientIp = mModes->client_ip;
+    
     mClientPort = 55555;
 
     memset(&mClientAddr, 0, sizeof(mClientAddr));
@@ -109,8 +123,17 @@ void SystemStateMonitor::SendHeartbeat() {
         return;
     }
 
-    std::string heartbeatMessage = "Heartbeat from RTL-SDR Monitor";
-    ssize_t sentBytes = sendto(mUdpSockFd, heartbeatMessage.c_str(), heartbeatMessage.size(), 0,
+    uint8_t heartbeatMessage[20];
+    memset(heartbeatMessage, 0x11, sizeof(heartbeatMessage));
+
+    heartbeatMessage[0] = static_cast<uint8_t>(mIsSDRConnected ? 1 : 0);
+    heartbeatMessage[1] = static_cast<uint8_t>(mIsWiFiEnabled ? 1 : 0);
+
+    std::cout << "Sending heartbeat to " << mClientIp << ":" << mClientPort
+              << " [SDR=" << (int)heartbeatMessage[0]
+              << ", WiFi=" << (int)heartbeatMessage[1] << "]" << std::endl;
+
+    ssize_t sentBytes = sendto(mUdpSockFd, heartbeatMessage, 20, 0,
                                reinterpret_cast<struct sockaddr*>(&mClientAddr), sizeof(mClientAddr));
     if (sentBytes < 0) {
         std::cerr << "Failed to send heartbeat message: " << strerror(errno) << std::endl;
@@ -197,8 +220,10 @@ void SystemStateMonitor::MonitorLoop() {
         bool isConnected = IsRtlSdrConnected(nullptr); //RTL
         if (isConnected) {
             std::cout << "RTL-SDR Device Connected." << std::endl;
+            mIsSDRConnected = true;
         } else {
             std::cout << "RTL-SDR Device Disconnected!" << std::endl;
+            mIsSDRConnected = false;
         }
 
         if (isConnected && !wasConnected) {
@@ -214,10 +239,12 @@ void SystemStateMonitor::MonitorLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             RestartReaderThread();
 
+            mIsSDRConnected = true;
             wasConnected = true;
         } else if (!isConnected && wasConnected) {
             std::cout << "[Monitor] RTL-SDR disconnected." << std::endl;
             NotifyReaderExit();
+            mIsSDRConnected = false;
             wasConnected = false;
         }
 

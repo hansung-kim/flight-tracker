@@ -40,6 +40,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <curl/curl.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
@@ -66,6 +67,9 @@ int getTermRows();
 
 bool g_reader_thread_active = false;
 pthread_mutex_t g_thread_lock = PTHREAD_MUTEX_INITIALIZER;
+
+const char* my_ckey = "J1y+RwJnL_ZM1nKZ!w1YVWx%DzlqPPPL~g83DKb(3l~E%>J}26gG=jCyT8fP-Pz4a!OD)ZBK)q|]Hp$?MD}O--L6A%k:7)b]].a#%3bP#>B9Go";
+const char* reconnect_cmd = "nc -w 60 localhost 30002 | nc -w 60 data.adsbhub.org 5001";
 
 /* ============================= Utility functions ========================== */
 
@@ -2292,6 +2296,81 @@ void modesWaitReadableClients(int timeout_ms) {
     select(maxfd+1,&fds,NULL,NULL,&tv);
 }
 
+#if 1
+void MaintainADSBHubConnection(const char* ckey, const char* reconnectCmd) {
+    static char myip4[64] = "0.0.0.0";
+    static char myip6[64] = "";
+    static int cmin = 0;
+
+    FILE* pipe = popen("netstat -an | grep ':5001'", "r");
+    char buffer[512];
+    int connected = 0;
+    if (pipe) {
+        while (fgets(buffer, sizeof(buffer), pipe)) {
+            if (strstr(buffer, "ESTABLISHED")) {
+                connected = 1;
+                break;
+            }
+        }
+        pclose(pipe);
+    }
+
+    if (!connected) {
+        printf("[ADSBHub] Not connected. Reconnecting...\n");
+        char fullCmd[1024];
+        snprintf(fullCmd, sizeof(fullCmd), "(%s) &", reconnectCmd);
+        system(fullCmd);
+    } else {
+        printf("[ADSBHub] Connected.\n");
+    }
+
+    if (ckey && strlen(ckey) > 0) {
+        cmin--;
+        if (cmin <= 0) {
+            cmin = 5;
+
+            char ip4[64] = "", ip6[64] = "";
+
+            FILE* f4 = popen("curl -s https://ip4.adsbhub.org/getmyip.php", "r");
+            if (f4) {
+                fgets(ip4, sizeof(ip4), f4);
+                strtok(ip4, "\n");
+                pclose(f4);
+            }
+
+            FILE* f6 = popen("curl -s https://ip6.adsbhub.org/getmyip.php", "r");
+            if (f6) {
+                fgets(ip6, sizeof(ip6), f6);
+                strtok(ip6, "\n");
+                pclose(f6);
+            }
+
+            if (strcmp(ip4, myip4) != 0 || strcmp(ip6, myip6) != 0) {
+                CURL* curl = curl_easy_init();
+                if (curl) {
+                    char url[512];
+                    snprintf(url, sizeof(url),
+                        "https://www.adsbhub.org/updateip.php?sessid=%s&myip=%s&myip6=%s",
+                        ckey, ip4, ip6);
+                    curl_easy_setopt(curl, CURLOPT_URL, url);
+                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+                    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                    CURLcode res = curl_easy_perform(curl);
+                    if (res == CURLE_OK) {
+                        printf("[ADSBHub] IP updated: %s / %s\n", ip4, ip6);
+                        strncpy(myip4, ip4, sizeof(myip4));
+                        strncpy(myip6, ip6, sizeof(myip6));
+                    } else {
+                        fprintf(stderr, "[ADSBHub] IP update failed: %s\n", curl_easy_strerror(res));
+                    }
+                    curl_easy_cleanup(curl);
+                }
+            }
+        }
+    }
+}
+#endif
+
 /* ============================ Terminal handling  ========================== */
 
 /* Handle resizing terminal. */
@@ -2368,6 +2447,47 @@ void backgroundTasks(void) {
         interactiveShowData();
         Modes.interactive_last_update = mstime();
     }
+}
+
+int isWiFiConnected() {
+    FILE* fp = popen("iwgetid -r", "r");
+    if (!fp) return 0;
+
+    char ssid[128] = {0};
+    fgets(ssid, sizeof(ssid), fp);
+    pclose(fp);
+
+    ssid[strcspn(ssid, "\n")] = 0;
+
+    return strlen(ssid) > 0;
+}
+
+void* adsbMonitorThread(void* arg) {
+    static bool wasConnected = false;
+    //mIsWiFiEnabled = false;
+
+    while (1) {
+        bool nowConnected = isWiFiConnected();
+
+        if (nowConnected && !wasConnected) {
+            printf("[ADSBHub] Wi-Fi is connected (first or reconnected).\n");
+            //mIsWiFiEnabled = true;
+            MaintainADSBHubConnection(my_ckey, reconnect_cmd);
+        }
+
+        if (nowConnected) {
+            printf("[ADSBHub] Wi-Fi is connected.\n");
+            //mIsWiFiEnabled = true;
+        } else {
+            printf("[ADSBHub] Wi-Fi is NOT connected.\n");
+            //mIsWiFiEnabled = false;
+        }
+
+        wasConnected = nowConnected;
+        sleep(5);
+    }
+
+    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -2483,6 +2603,9 @@ int main(int argc, char **argv) {
         backgroundTasks();
         modesWaitReadableClients(100);
     }
+
+    
+    pthread_create(&Modes.adsb_thread, NULL, adsbMonitorThread, NULL);
 
     /* Create the thread that will read the data from the device. */
     pthread_create(&Modes.reader_thread, NULL, readerThreadEntryPoint, NULL);
